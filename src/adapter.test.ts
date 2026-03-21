@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { ValidationError } from "@chat-adapter/shared";
 import {
   type SendMessageResponse,
@@ -6,6 +7,10 @@ import {
 import { Card, getEmoji, NotImplementedError, type ChatInstance } from "chat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KapsoAdapter } from "./adapter.js";
+import type {
+  KapsoRawMessage,
+  KapsoWebhookMessageReceivedEvent,
+} from "./types.js";
 
 function createTestAdapter(): KapsoAdapter {
   return new KapsoAdapter({
@@ -21,6 +26,31 @@ function getClient(adapter: KapsoAdapter): WhatsAppClient {
   return (adapter as unknown as { client: WhatsAppClient }).client;
 }
 
+function createLogger() {
+  const logger = {
+    child: () => logger,
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  };
+
+  return logger;
+}
+
+async function initializeAdapterForWebhooks(adapter = createTestAdapter()) {
+  const logger = createLogger();
+  const processMessage = vi.fn();
+  const chat = {
+    getLogger: () => logger,
+    processMessage,
+  } as unknown as ChatInstance;
+
+  await adapter.initialize(chat);
+
+  return { adapter, logger, processMessage };
+}
+
 function createSendResponse(messageId: string): SendMessageResponse {
   return {
     messagingProduct: "whatsapp",
@@ -31,6 +61,129 @@ function createSendResponse(messageId: string): SendMessageResponse {
       },
     ],
     messages: [{ id: messageId }],
+  };
+}
+
+function createWebhookSignature(body: string): string {
+  return createHmac("sha256", "test-secret").update(body).digest("hex");
+}
+
+function createKapsoWebhookRequest(
+  payload: unknown,
+  options?: {
+    headers?: HeadersInit;
+    method?: string;
+    rawBody?: string;
+    signature?: string;
+  },
+): Request {
+  const body =
+    options?.rawBody ??
+    (typeof payload === "string" ? payload : JSON.stringify(payload));
+  const headers = new Headers(options?.headers);
+  headers.set("Content-Type", "application/json");
+  headers.set(
+    "x-webhook-signature",
+    options?.signature ?? createWebhookSignature(body),
+  );
+
+  return new Request("https://example.com/webhooks/kapso", {
+    method: options?.method ?? "POST",
+    headers,
+    body,
+  });
+}
+
+function createReceivedTextWebhookEvent(
+  overrides?: Partial<KapsoWebhookMessageReceivedEvent>,
+): KapsoWebhookMessageReceivedEvent {
+  return {
+    message: {
+      id: "wamid.123",
+      timestamp: "1730092800",
+      type: "text",
+      text: { body: "Hello from Kapso" },
+      kapso: {
+        direction: "inbound",
+        status: "received",
+        processing_status: "pending",
+        origin: "cloud_api",
+        has_media: false,
+        content: "Hello from Kapso",
+      },
+    },
+    conversation: {
+      id: "conv_123",
+      phone_number: "+1 (555) 123-4567",
+      status: "active",
+      metadata: {},
+      phone_number_id: "123456789",
+      kapso: {
+        contact_name: "John Doe",
+        messages_count: 1,
+        last_message_id: "wamid.123",
+        last_message_type: "text",
+        last_message_timestamp: "2025-10-28T14:25:01Z",
+        last_message_text: "Hello from Kapso",
+        last_inbound_at: "2025-10-28T14:25:01Z",
+        last_outbound_at: null,
+      },
+    },
+    is_new_conversation: true,
+    phone_number_id: "123456789",
+    ...overrides,
+  };
+}
+
+function createTextRawMessage(): KapsoRawMessage {
+  return {
+    phoneNumberId: "123456789",
+    userWaId: "15551234567",
+    contactName: "John Doe",
+    message: {
+      id: "wamid.text",
+      timestamp: "1730092800",
+      type: "text",
+      text: { body: "Hello *Kapso*" },
+      kapso: {
+        direction: "inbound",
+        status: "received",
+        processing_status: "pending",
+        origin: "cloud_api",
+        has_media: false,
+        content: "Hello *Kapso*",
+      },
+    },
+  };
+}
+
+function createImageRawMessage(): KapsoRawMessage {
+  return {
+    phoneNumberId: "123456789",
+    userWaId: "15551234567",
+    contactName: "Jane Doe",
+    message: {
+      id: "wamid.image",
+      timestamp: "1730093000",
+      type: "image",
+      image: {
+        id: "media_123",
+      },
+      kapso: {
+        direction: "inbound",
+        status: "received",
+        processing_status: "pending",
+        origin: "cloud_api",
+        has_media: true,
+        media_url: "https://api.kapso.ai/media/photo.jpg",
+        media_data: {
+          url: "https://api.kapso.ai/media/photo.jpg",
+          filename: "photo.jpg",
+          content_type: "image/jpeg",
+          byte_size: 204800,
+        },
+      },
+    },
   };
 }
 
@@ -201,6 +354,7 @@ describe("KapsoAdapter", () => {
         threadId: "kapso:123456789:15551234567",
         raw: {
           phoneNumberId: "123456789",
+          userWaId: "15551234567",
           message: {
             id: "wamid.sent123",
             type: "text",
@@ -349,7 +503,9 @@ describe("KapsoAdapter", () => {
       await expect(
         adapter.postMessage("kapso:123456789:15551234567", {
           raw: "hello",
-          attachments: [{ type: "image", url: "https://example.com/image.png" }],
+          attachments: [
+            { type: "image", url: "https://example.com/image.png" },
+          ],
         }),
       ).rejects.toThrow(ValidationError);
     });
@@ -434,24 +590,224 @@ describe("KapsoAdapter", () => {
     });
   });
 
-  describe("unimplemented methods", () => {
-    it("throws for parseMessage", () => {
+  describe("handleWebhook", () => {
+    it("rejects non-POST requests", async () => {
       const adapter = createTestAdapter();
 
-      expect(() => adapter.parseMessage({} as never)).toThrow(
-        NotImplementedError,
+      const response = await adapter.handleWebhook(
+        new Request("https://example.com/webhooks/kapso", { method: "GET" }),
       );
-      expect(() => adapter.parseMessage({} as never)).toThrow("parseMessage");
+
+      expect(response.status).toBe(405);
+      expect(response.headers.get("allow")).toBe("POST");
     });
 
+    it("rejects requests with an invalid signature", async () => {
+      const { adapter, processMessage } = await initializeAdapterForWebhooks();
+      const response = await adapter.handleWebhook(
+        createKapsoWebhookRequest(createReceivedTextWebhookEvent(), {
+          headers: {
+            "x-webhook-event": "whatsapp.message.received",
+          },
+          signature: "invalid-signature",
+        }),
+      );
+
+      expect(response.status).toBe(401);
+      expect(processMessage).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 for invalid JSON", async () => {
+      const { adapter, processMessage, logger } =
+        await initializeAdapterForWebhooks();
+      const rawBody = "{";
+      const response = await adapter.handleWebhook(
+        createKapsoWebhookRequest(rawBody, {
+          rawBody,
+          headers: {
+            "x-webhook-event": "whatsapp.message.received",
+          },
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith("Kapso webhook invalid JSON", {
+        contentType: "application/json",
+        bodyPreview: "{",
+      });
+    });
+
+    it("processes whatsapp.message.received webhook payloads", async () => {
+      const { adapter, processMessage } = await initializeAdapterForWebhooks();
+      const options = { waitUntil: vi.fn() };
+      const response = await adapter.handleWebhook(
+        createKapsoWebhookRequest(createReceivedTextWebhookEvent(), {
+          headers: {
+            "x-webhook-event": "whatsapp.message.received",
+          },
+        }),
+        options,
+      );
+
+      expect(response.status).toBe(200);
+      expect(processMessage).toHaveBeenCalledOnce();
+      expect(processMessage).toHaveBeenCalledWith(
+        adapter,
+        "kapso:123456789:15551234567",
+        expect.any(Function),
+        options,
+      );
+
+      const factory = processMessage.mock.calls[0]?.[2] as
+        | (() => Promise<ReturnType<KapsoAdapter["parseMessage"]>>)
+        | undefined;
+      expect(factory).toBeTypeOf("function");
+
+      const message = await factory?.();
+      expect(message?.text).toBe("Hello from Kapso");
+      expect(message?.author.userId).toBe("15551234567");
+      expect(message?.author.userName).toBe("John Doe");
+      expect(message?.threadId).toBe("kapso:123456789:15551234567");
+      expect(message?.raw.userWaId).toBe("15551234567");
+    });
+
+    it("processes buffered whatsapp.message.received webhook payloads", async () => {
+      const { adapter, processMessage } = await initializeAdapterForWebhooks();
+      const payload = {
+        batch: true,
+        data: [
+          createReceivedTextWebhookEvent(),
+          createReceivedTextWebhookEvent({
+            message: {
+              id: "wamid.456",
+              timestamp: "1730092801",
+              type: "text",
+              text: { body: "Second message" },
+              kapso: {
+                direction: "inbound",
+                status: "received",
+                processing_status: "pending",
+                origin: "cloud_api",
+                has_media: false,
+                content: "Second message",
+              },
+            },
+            conversation: {
+              id: "conv_456",
+              phone_number: "+1 (555) 000-0000",
+              status: "active",
+              metadata: {},
+              phone_number_id: "123456789",
+              kapso: {
+                contact_name: "Second User",
+              },
+            },
+          }),
+        ],
+        batch_info: {
+          size: 2,
+          window_ms: 5000,
+          first_sequence: 100,
+          last_sequence: 101,
+          conversation_id: "conv_123",
+        },
+      };
+
+      const response = await adapter.handleWebhook(
+        createKapsoWebhookRequest(payload, {
+          headers: {
+            "x-webhook-batch": "true",
+            "x-webhook-event": "whatsapp.message.received",
+          },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(processMessage).toHaveBeenCalledTimes(2);
+      expect(processMessage.mock.calls[0]?.[1]).toBe(
+        "kapso:123456789:15551234567",
+      );
+      expect(processMessage.mock.calls[1]?.[1]).toBe(
+        "kapso:123456789:15550000000",
+      );
+    });
+
+    it("deduplicates repeated webhook deliveries by X-Idempotency-Key", async () => {
+      const { adapter, processMessage } = await initializeAdapterForWebhooks();
+      const requestOptions = {
+        headers: {
+          "x-idempotency-key": "evt_123",
+          "x-webhook-event": "whatsapp.message.received",
+        },
+      };
+
+      const first = await adapter.handleWebhook(
+        createKapsoWebhookRequest(
+          createReceivedTextWebhookEvent(),
+          requestOptions,
+        ),
+      );
+      const second = await adapter.handleWebhook(
+        createKapsoWebhookRequest(
+          createReceivedTextWebhookEvent(),
+          requestOptions,
+        ),
+      );
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(processMessage).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("parseMessage", () => {
+    it("parses inbound text messages", () => {
+      const adapter = createTestAdapter();
+      const message = adapter.parseMessage(createTextRawMessage());
+
+      expect(message.id).toBe("wamid.text");
+      expect(message.threadId).toBe("kapso:123456789:15551234567");
+      expect(message.text).toBe("Hello *Kapso*");
+      expect(message.formatted.type).toBe("root");
+      expect(message.author).toEqual({
+        userId: "15551234567",
+        userName: "John Doe",
+        fullName: "John Doe",
+        isBot: false,
+        isMe: false,
+      });
+      expect(message.metadata).toEqual({
+        dateSent: new Date(1730092800 * 1000),
+        edited: false,
+      });
+      expect(message.attachments).toEqual([]);
+      expect(message.raw).toEqual(createTextRawMessage());
+    });
+
+    it("builds fallback text and attachments for non-text messages", () => {
+      const adapter = createTestAdapter();
+      const message = adapter.parseMessage(createImageRawMessage());
+
+      expect(message.text).toBe("[Image: photo.jpg]");
+      expect(message.author.userId).toBe("15551234567");
+      expect(message.attachments).toEqual([
+        {
+          type: "image",
+          url: "https://api.kapso.ai/media/photo.jpg",
+          mimeType: "image/jpeg",
+          name: "photo.jpg",
+          size: 204800,
+        },
+      ]);
+    });
+  });
+
+  describe("unimplemented methods", () => {
     const createAsyncCalls = () => {
       const adapter = createTestAdapter();
 
       return [
-        {
-          name: "handleWebhook",
-          call: () => adapter.handleWebhook(new Request("https://example.com")),
-        },
         {
           name: "editMessage",
           call: () =>

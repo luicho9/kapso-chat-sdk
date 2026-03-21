@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   extractCard,
   extractFiles,
@@ -10,6 +11,7 @@ import {
 import {
   type Adapter,
   type AdapterPostableMessage,
+  type Attachment,
   type ChatInstance,
   ConsoleLogger,
   convertEmojiPlaceholders,
@@ -19,7 +21,7 @@ import {
   type FetchResult,
   type FormattedContent,
   type Logger,
-  type Message,
+  Message,
   NotImplementedError,
   type RawMessage,
   type ThreadInfo,
@@ -28,12 +30,87 @@ import {
 import { KapsoFormatConverter } from "./format-converter.js";
 import type {
   KapsoAdapterConfig,
+  KapsoMessage,
   KapsoRawMessage,
   KapsoThreadId,
+  KapsoWebhookConversation,
+  KapsoWebhookMessageReceivedEvent,
 } from "./types.js";
 
 /** Maximum message length for WhatsApp Cloud API */
 const KAPSO_MESSAGE_LIMIT = 4096;
+const KAPSO_MESSAGE_RECEIVED_EVENT = "whatsapp.message.received";
+const MAX_PROCESSED_WEBHOOK_KEYS = 1024;
+
+type JsonObject = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null;
+}
+
+function readValue(record: JsonObject | undefined, ...keys: string[]): unknown {
+  if (!record) {
+    return undefined;
+  }
+
+  for (const key of keys) {
+    if (key in record) {
+      return record[key];
+    }
+  }
+
+  return undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function normalizeUserWaId(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const normalized = value.replace(/\D/g, "");
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function parseUnixTimestamp(value: unknown): Date {
+  const seconds = readNumber(value);
+  return seconds === undefined ? new Date(0) : new Date(seconds * 1000);
+}
+
+function isKapsoMessage(value: unknown): value is KapsoMessage {
+  return (
+    isRecord(value) &&
+    readString(readValue(value, "id")) !== undefined &&
+    readString(readValue(value, "type")) !== undefined &&
+    readString(readValue(value, "timestamp")) !== undefined
+  );
+}
+
+function isKapsoWebhookMessageReceivedEvent(
+  value: unknown,
+): value is KapsoWebhookMessageReceivedEvent {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return isKapsoMessage(readValue(value, "message"));
+}
 
 /**
  * Split text into chunks that fit within WhatsApp's message limit,
@@ -80,8 +157,10 @@ function splitMessage(text: string): string[] {
 /**
  * Kapso adapter for Chat SDK.
  *
- * Supports outbound text messages and reactions via the Kapso WhatsApp API.
- * Inbound webhook handling and history/thread APIs are implemented separately.
+ * Supports outbound text messages, reactions, and inbound Kapso webhook
+ * handling for real-time message processing.
+ *
+ * History/thread APIs are implemented separately.
  */
 export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
   readonly name = "kapso";
@@ -93,8 +172,10 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
   private readonly webhookSecret: string;
   private readonly client: WhatsAppClient;
   private readonly formatConverter = new KapsoFormatConverter();
+  private chat: ChatInstance | null = null;
   private logger: Logger;
   private _botUserId: string | null = null;
+  private readonly processedWebhookKeys = new Map<string, number>();
 
   get botUserId(): string | undefined {
     return this._botUserId ?? undefined;
@@ -114,6 +195,7 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
+    this.chat = chat;
     this.logger = chat.getLogger("kapso");
     this._botUserId = this.phoneNumberId;
 
@@ -177,14 +259,120 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
   }
 
   async handleWebhook(
-    _request: Request,
-    _options?: WebhookOptions,
+    request: Request,
+    options?: WebhookOptions,
   ): Promise<Response> {
-    this.notImplemented("handleWebhook");
+    if (request.method !== "POST") {
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: {
+          Allow: "POST",
+        },
+      });
+    }
+
+    const body = await request.text();
+    const signature = request.headers.get("x-webhook-signature");
+    if (!this.verifyWebhookSignature(body, signature)) {
+      return new Response("Invalid signature", { status: 401 });
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      this.logger.error("Kapso webhook invalid JSON", {
+        contentType: request.headers.get("content-type"),
+        bodyPreview: body.slice(0, 200),
+      });
+      return new Response("Invalid JSON", { status: 400 });
+    }
+
+    if (!this.chat) {
+      this.logger.warn("Chat instance not initialized, ignoring webhook");
+      return new Response("OK", { status: 200 });
+    }
+
+    const payloadRecord = isRecord(payload) ? payload : undefined;
+    const eventName =
+      request.headers.get("x-webhook-event") ??
+      readString(readValue(payloadRecord, "event"));
+
+    if (eventName && eventName !== KAPSO_MESSAGE_RECEIVED_EVENT) {
+      this.logger.debug("Ignoring unsupported Kapso webhook event", {
+        event: eventName,
+      });
+      return new Response("OK", { status: 200 });
+    }
+
+    const idempotencyKey = request.headers.get("x-idempotency-key");
+    if (idempotencyKey && this.processedWebhookKeys.has(idempotencyKey)) {
+      this.logger.debug("Ignoring duplicate Kapso webhook delivery", {
+        idempotencyKey,
+      });
+      return new Response("OK", { status: 200 });
+    }
+
+    const events = this.extractWebhookEvents(
+      payload,
+      request.headers.get("x-webhook-batch"),
+    );
+
+    for (const event of events) {
+      const raw = this.buildWebhookRawMessage(event);
+      if (!raw) {
+        continue;
+      }
+
+      const threadId = this.encodeThreadId({
+        phoneNumberId: raw.phoneNumberId,
+        userWaId: raw.userWaId,
+      });
+
+      this.chat.processMessage(
+        this,
+        threadId,
+        async () => this.parseMessage(raw),
+        options,
+      );
+    }
+
+    if (idempotencyKey && events.length > 0) {
+      this.rememberProcessedWebhookKey(idempotencyKey);
+    }
+
+    return new Response("OK", { status: 200 });
   }
 
-  parseMessage(_raw: KapsoRawMessage): Message<KapsoRawMessage> {
-    return this.notImplemented("parseMessage");
+  parseMessage(raw: KapsoRawMessage): Message<KapsoRawMessage> {
+    const threadId = this.encodeThreadId({
+      phoneNumberId: raw.phoneNumberId,
+      userWaId: raw.userWaId,
+    });
+    const senderId = this.resolveSenderId(raw);
+    const isMe = senderId === this._botUserId;
+    const displayName = raw.contactName ?? (isMe ? this.userName : raw.userWaId);
+    const text = this.extractMessageText(raw.message);
+
+    return new Message<KapsoRawMessage>({
+      id: raw.message.id,
+      threadId,
+      text,
+      formatted: this.formatConverter.toAst(text),
+      raw,
+      author: {
+        userId: senderId,
+        userName: displayName,
+        fullName: displayName,
+        isBot: false,
+        isMe,
+      },
+      metadata: {
+        dateSent: parseUnixTimestamp(raw.message.timestamp),
+        edited: false,
+      },
+      attachments: this.buildAttachments(raw.message),
+    });
   }
 
   async postMessage(
@@ -320,6 +508,7 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
       threadId,
       raw: {
         phoneNumberId: this.phoneNumberId,
+        userWaId: to,
         message: {
           id,
           type: "text",
@@ -350,9 +539,282 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
     return messageId;
   }
 
+  private verifyWebhookSignature(
+    body: string,
+    signature: string | null,
+  ): boolean {
+    if (!signature) {
+      return false;
+    }
+
+    const expected = createHmac("sha256", this.webhookSecret)
+      .update(body)
+      .digest("hex");
+
+    try {
+      return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  }
+
+  private extractWebhookEvents(
+    payload: unknown,
+    batchHeader: string | null,
+  ): KapsoWebhookMessageReceivedEvent[] {
+    if (!isRecord(payload)) {
+      return [];
+    }
+
+    const data = readValue(payload, "data");
+    if (Array.isArray(data)) {
+      return data.filter(isKapsoWebhookMessageReceivedEvent);
+    }
+
+    const isBatch = batchHeader === "true" || readValue(payload, "batch") === true;
+    if (isBatch) {
+      return [];
+    }
+
+    return isKapsoWebhookMessageReceivedEvent(payload) ? [payload] : [];
+  }
+
+  private buildWebhookRawMessage(
+    event: KapsoWebhookMessageReceivedEvent,
+  ): KapsoRawMessage | null {
+    const { message } = event;
+    const kapso = message.kapso;
+    const direction = kapso?.direction;
+    if (direction && direction !== "inbound") {
+      this.logger.debug("Ignoring non-inbound Kapso message event", {
+        direction,
+        messageId: message.id,
+      });
+      return null;
+    }
+
+    const conversation = event.conversation;
+    const phoneNumberId =
+      event.phone_number_id ??
+      event.phoneNumberId ??
+      conversation?.phone_number_id ??
+      conversation?.phoneNumberId ??
+      this.phoneNumberId;
+    const userWaId =
+      normalizeUserWaId(message.from) ??
+      normalizeUserWaId(conversation?.phone_number ?? conversation?.phoneNumber);
+
+    if (!userWaId) {
+      this.logger.warn("Kapso webhook message missing sender identifier", {
+        messageId: message.id,
+        phoneNumberId,
+      });
+      return null;
+    }
+
+    return {
+      phoneNumberId,
+      userWaId,
+      message,
+      contactName: this.extractContactName(conversation),
+    };
+  }
+
+  private extractContactName(
+    conversation: KapsoWebhookConversation | undefined,
+  ): string | undefined {
+    return conversation?.kapso?.contactName ?? conversation?.kapso?.contact_name;
+  }
+
+  private rememberProcessedWebhookKey(idempotencyKey: string): void {
+    this.processedWebhookKeys.set(idempotencyKey, Date.now());
+
+    while (this.processedWebhookKeys.size > MAX_PROCESSED_WEBHOOK_KEYS) {
+      const oldestKey = this.processedWebhookKeys.keys().next().value;
+      if (!oldestKey) {
+        break;
+      }
+      this.processedWebhookKeys.delete(oldestKey);
+    }
+  }
+
+  private resolveSenderId(raw: KapsoRawMessage): string {
+    const senderId = raw.message.from;
+    if (senderId) {
+      return senderId;
+    }
+
+    const direction = raw.message.kapso?.direction;
+    if (direction === "outbound") {
+      return raw.phoneNumberId;
+    }
+
+    return raw.userWaId;
+  }
+
+  private extractMessageText(message: KapsoMessage): string {
+    const type = message.type || "message";
+    const kapso = message.kapso;
+    const mediaData = kapso?.mediaData ?? kapso?.media_data;
+    const messageTypeData =
+      kapso?.messageTypeData ?? kapso?.message_type_data;
+    const transcript = kapso?.transcript;
+    const kapsoContent = this.extractKapsoContent(kapso);
+    const textBody = message.text?.body;
+    if (textBody) {
+      return textBody;
+    }
+
+    const caption =
+      message.image?.caption ??
+      message.video?.caption ??
+      message.document?.caption ??
+      readString(readValue(messageTypeData, "caption"));
+    const transcriptText =
+      (typeof transcript?.text === "string" ? transcript.text : undefined) ??
+      transcript?.body;
+    const filename = mediaData?.filename ?? message.document?.filename;
+
+    switch (type) {
+      case "text":
+        return kapsoContent ?? "";
+      case "image":
+        return caption ?? kapsoContent ?? this.buildMediaFallback("Image", filename);
+      case "video":
+        return caption ?? kapsoContent ?? this.buildMediaFallback("Video", filename);
+      case "document":
+        return caption ?? kapsoContent ?? this.buildMediaFallback("Document", filename);
+      case "audio":
+        return transcriptText ?? kapsoContent ?? this.buildMediaFallback("Audio", filename);
+      case "sticker":
+        return kapsoContent ?? this.buildMediaFallback("Sticker", filename);
+      case "location": {
+        const location = message.location;
+        const name = location?.name;
+        const address = location?.address;
+        const latitude = location?.latitude;
+        const longitude = location?.longitude;
+        if (name && address) {
+          return `[Location: ${name} - ${address}]`;
+        }
+        if (name) {
+          return `[Location: ${name}]`;
+        }
+        if (latitude !== undefined && longitude !== undefined) {
+          return `[Location: ${latitude}, ${longitude}]`;
+        }
+        return "[Location]";
+      }
+      case "contacts":
+        return kapsoContent ?? "[Contact card]";
+      case "reaction": {
+        const emoji = message.reaction?.emoji;
+        return emoji ? `[Reaction: ${emoji}]` : "[Reaction]";
+      }
+      case "interactive":
+        return kapsoContent ?? "[Interactive message]";
+      case "template": {
+        const name = message.template?.name;
+        return name ? `[Template: ${name}]` : kapsoContent ?? "[Template]";
+      }
+      case "order":
+        return (
+          kapso?.orderText ??
+          kapso?.order_text ??
+          message.order?.orderText ??
+          kapsoContent ??
+          "[Order]"
+        );
+      default:
+        return kapsoContent ?? `[${type}]`;
+    }
+  }
+
+  private extractKapsoContent(kapso: KapsoMessage["kapso"]): string | undefined {
+    const content = kapso?.content;
+    if (typeof content === "string" && content.length > 0) {
+      return content;
+    }
+
+    if (isRecord(content)) {
+      return readString(readValue(content, "text", "body", "value"));
+    }
+
+    return undefined;
+  }
+
+  private buildMediaFallback(label: string, filename: string | undefined): string {
+    return filename ? `[${label}: ${filename}]` : `[${label}]`;
+  }
+
+  private buildAttachments(message: KapsoMessage): Attachment[] {
+    const type = message.type;
+    const kapso = message.kapso;
+    const mediaData = kapso?.mediaData ?? kapso?.media_data;
+    const mediaUrl =
+      kapso?.mediaUrl ??
+      kapso?.media_url ??
+      mediaData?.url;
+    const mimeType = mediaData?.contentType ?? mediaData?.content_type;
+    const size = mediaData?.byteSize ?? mediaData?.byte_size;
+    const attachments: Attachment[] = [];
+
+    const pushMediaAttachment = (
+      attachmentType: Attachment["type"],
+      name?: string,
+    ) => {
+      attachments.push({
+        type: attachmentType,
+        url: mediaUrl,
+        mimeType,
+        name,
+        size,
+      });
+    };
+
+    switch (type) {
+      case "image":
+        pushMediaAttachment("image", mediaData?.filename);
+        break;
+      case "video":
+        pushMediaAttachment("video", mediaData?.filename);
+        break;
+      case "audio":
+        pushMediaAttachment("audio", mediaData?.filename ?? "audio");
+        break;
+      case "document":
+        pushMediaAttachment(
+          "file",
+          message.document?.filename ?? mediaData?.filename ?? "document",
+        );
+        break;
+      case "sticker":
+        pushMediaAttachment("image", mediaData?.filename ?? "sticker");
+        break;
+      case "location": {
+        const latitude = message.location?.latitude;
+        const longitude = message.location?.longitude;
+
+        if (latitude !== undefined && longitude !== undefined) {
+          attachments.push({
+            type: "file",
+            name: message.location?.name ?? "Location",
+            url: `https://www.google.com/maps?q=${latitude},${longitude}`,
+            mimeType: "application/geo+json",
+          });
+        }
+        break;
+      }
+      default:
+        break;
+    }
+
+    return attachments;
+  }
+
   private notImplemented(method: string): never {
     throw new NotImplementedError(
-      `Kapso adapter ${method} is not implemented yet.`,
+      `Kapso adapter ${method} is not implemented.`,
       method,
     );
   }
