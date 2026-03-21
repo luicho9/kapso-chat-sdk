@@ -1,0 +1,1 @@
+// @kapso/chat-sdk-adapter
