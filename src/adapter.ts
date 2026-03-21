@@ -1,10 +1,19 @@
-import { ValidationError } from "@chat-adapter/shared";
-import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
+import {
+  extractCard,
+  extractFiles,
+  ValidationError,
+} from "@chat-adapter/shared";
+import {
+  type SendMessageResponse,
+  WhatsAppClient,
+} from "@kapso/whatsapp-cloud-api";
 import {
   type Adapter,
   type AdapterPostableMessage,
   type ChatInstance,
   ConsoleLogger,
+  convertEmojiPlaceholders,
+  defaultEmojiResolver,
   type EmojiValue,
   type FetchOptions,
   type FetchResult,
@@ -23,11 +32,56 @@ import type {
   KapsoThreadId,
 } from "./types.js";
 
+/** Maximum message length for WhatsApp Cloud API */
+const KAPSO_MESSAGE_LIMIT = 4096;
+
+/**
+ * Split text into chunks that fit within WhatsApp's message limit,
+ * breaking on paragraph boundaries (\n\n) when possible, then line
+ * boundaries (\n), and finally at the character limit as a last resort.
+ */
+function splitMessage(text: string): string[] {
+  if (text.length <= KAPSO_MESSAGE_LIMIT) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > KAPSO_MESSAGE_LIMIT) {
+    const slice = remaining.slice(0, KAPSO_MESSAGE_LIMIT);
+
+    // Try to break at a paragraph boundary
+    let breakIndex = slice.lastIndexOf("\n\n");
+    let breakLength = 2;
+    if (breakIndex === -1 || breakIndex < KAPSO_MESSAGE_LIMIT / 2) {
+      // Try a line boundary
+      breakIndex = slice.lastIndexOf("\n");
+      breakLength = 1;
+    }
+    if (breakIndex === -1 || breakIndex < KAPSO_MESSAGE_LIMIT / 2) {
+      // Hard break at the limit
+      breakIndex = KAPSO_MESSAGE_LIMIT;
+      breakLength = 0;
+    }
+
+    const chunkEnd = breakIndex + breakLength;
+    chunks.push(remaining.slice(0, chunkEnd));
+    remaining = remaining.slice(chunkEnd);
+  }
+
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
 /**
  * Kapso adapter for Chat SDK.
  *
- * This skeleton is intentionally limited to Kapso webhook mode and local
- * runtime helpers. Network behavior will be added later
+ * Supports outbound text messages and reactions via the Kapso WhatsApp API.
+ * Inbound webhook handling and history/thread APIs are implemented separately.
  */
 export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
   readonly name = "kapso";
@@ -134,10 +188,45 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
   }
 
   async postMessage(
-    _threadId: string,
-    _message: AdapterPostableMessage,
+    threadId: string,
+    message: AdapterPostableMessage,
   ): Promise<RawMessage<KapsoRawMessage>> {
-    this.notImplemented("postMessage");
+    const { userWaId } = this.decodeThreadId(threadId);
+    this.assertOutboundTextOnly(message);
+
+    const body = convertEmojiPlaceholders(
+      this.formatConverter.renderPostable(message),
+      "whatsapp",
+    );
+
+    if (body.trim().length === 0) {
+      throw new ValidationError(
+        "kapso",
+        "Kapso adapter requires a non-empty text message.",
+      );
+    }
+
+    const chunks = splitMessage(body);
+    let result: RawMessage<KapsoRawMessage> | null = null;
+
+    for (const chunk of chunks) {
+      const response = await this.client.messages.sendText({
+        phoneNumberId: this.phoneNumberId,
+        to: userWaId,
+        body: chunk,
+      });
+
+      result = this.buildRawTextMessage(threadId, userWaId, chunk, response);
+    }
+
+    if (!result) {
+      throw new ValidationError(
+        "kapso",
+        "Kapso adapter requires a non-empty text message.",
+      );
+    }
+
+    return result;
   }
 
   async editMessage(
@@ -153,19 +242,37 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
   }
 
   async addReaction(
-    _threadId: string,
-    _messageId: string,
-    _emoji: EmojiValue | string,
+    threadId: string,
+    messageId: string,
+    emoji: EmojiValue | string,
   ): Promise<void> {
-    this.notImplemented("addReaction");
+    const { userWaId } = this.decodeThreadId(threadId);
+
+    await this.client.messages.sendReaction({
+      phoneNumberId: this.phoneNumberId,
+      to: userWaId,
+      reaction: {
+        messageId,
+        emoji: defaultEmojiResolver.toGChat(emoji),
+      },
+    });
   }
 
   async removeReaction(
-    _threadId: string,
-    _messageId: string,
+    threadId: string,
+    messageId: string,
     _emoji: EmojiValue | string,
   ): Promise<void> {
-    this.notImplemented("removeReaction");
+    const { userWaId } = this.decodeThreadId(threadId);
+
+    await this.client.messages.sendReaction({
+      phoneNumberId: this.phoneNumberId,
+      to: userWaId,
+      reaction: {
+        messageId,
+        emoji: "",
+      },
+    });
   }
 
   async startTyping(_threadId: string, _status?: string): Promise<void> {
@@ -181,6 +288,66 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
 
   async fetchThread(_threadId: string): Promise<ThreadInfo> {
     this.notImplemented("fetchThread");
+  }
+
+  private assertOutboundTextOnly(message: AdapterPostableMessage): void {
+    const hasAttachments =
+      typeof message === "object" &&
+      message !== null &&
+      "attachments" in message &&
+      Array.isArray(message.attachments) &&
+      message.attachments.length > 0;
+    const hasFiles = extractFiles(message).length > 0;
+
+    if (extractCard(message) || hasAttachments || hasFiles) {
+      throw new ValidationError(
+        "kapso",
+        "Kapso adapter only supports text messages. Cards, attachments, and files are not supported.",
+      );
+    }
+  }
+
+  private buildRawTextMessage(
+    threadId: string,
+    to: string,
+    body: string,
+    response: SendMessageResponse,
+  ): RawMessage<KapsoRawMessage> {
+    const id = this.getResponseMessageId(response, "text message");
+
+    return {
+      id,
+      threadId,
+      raw: {
+        phoneNumberId: this.phoneNumberId,
+        message: {
+          id,
+          type: "text",
+          timestamp: String(Math.floor(Date.now() / 1000)),
+          from: this.phoneNumberId,
+          to,
+          text: {
+            body,
+          },
+        },
+      },
+    };
+  }
+
+  private getResponseMessageId(
+    response: SendMessageResponse,
+    operation: string,
+  ): string {
+    const messageId = response.messages[0]?.id;
+
+    if (!messageId) {
+      throw new ValidationError(
+        "kapso",
+        `Kapso SDK did not return a message ID for ${operation}.`,
+      );
+    }
+
+    return messageId;
   }
 
   private notImplemented(method: string): never {
