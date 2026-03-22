@@ -1,21 +1,23 @@
-# @kapso/chat-sdk-adapter
+# @luicho/kapso-chat-sdk
 
-[![npm version](https://img.shields.io/npm/v/%40kapso%2Fchat-sdk-adapter)](https://www.npmjs.com/package/@kapso/chat-sdk-adapter)
-[![npm downloads](https://img.shields.io/npm/dm/%40kapso%2Fchat-sdk-adapter)](https://www.npmjs.com/package/@kapso/chat-sdk-adapter)
+[![npm version](https://img.shields.io/npm/v/%40luicho%2Fkapso-chat-sdk)](https://www.npmjs.com/package/@luicho/kapso-chat-sdk)
+[![npm downloads](https://img.shields.io/npm/dm/%40luicho%2Fkapso-chat-sdk)](https://www.npmjs.com/package/@luicho/kapso-chat-sdk)
 
 WhatsApp adapter for [Chat SDK](https://chat-sdk.dev/docs) via Kapso, using Kapso webhook payloads and history APIs.
+
+> Unofficial community-maintained package. This adapter is not published or maintained by Kapso. If Kapso later ships an official package, prefer the official package name for new integrations.
 
 ## Installation
 
 ```bash
-pnpm add @kapso/chat-sdk-adapter chat
+pnpm add @luicho/kapso-chat-sdk chat
 ```
 
 ## Usage
 
 ```typescript
 import { Chat } from "chat";
-import { createKapsoAdapter } from "@kapso/chat-sdk-adapter";
+import { createKapsoAdapter } from "@luicho/kapso-chat-sdk";
 
 export const bot = new Chat({
   userName: "My Bot",

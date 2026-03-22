@@ -1,7 +1,7 @@
 {
-  "name": "@kapso/chat-sdk-adapter",
+  "name": "@luicho/kapso-chat-sdk",
   "version": "0.1.0",
-  "description": "Kapso adapter for Chat SDK",
+  "description": "Unofficial Kapso adapter for Chat SDK",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
