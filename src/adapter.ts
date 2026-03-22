@@ -26,7 +26,6 @@ import {
   getEmoji,
   type Logger,
   Message,
-  NotImplementedError,
   type RawMessage,
   type ThreadInfo,
   type WebhookOptions,
@@ -566,9 +565,20 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
     });
   }
 
-  /** Not implemented. Always throws `NotImplementedError`. */
+  /**
+   * WhatsApp typing is only supported as part of mark-as-read.
+   * Match the official adapter and make standalone typing a no-op.
+   */
   async startTyping(_threadId: string, _status?: string): Promise<void> {
-    this.notImplemented("startTyping");
+    return undefined;
+  }
+
+  /** Mark an inbound message as read. */
+  async markAsRead(messageId: string): Promise<void> {
+    await this.client.messages.markRead({
+      phoneNumberId: this.phoneNumberId,
+      messageId,
+    });
   }
 
   /**
@@ -873,13 +883,6 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
       }
       this.processedWebhookKeys.delete(oldestKey);
     }
-  }
-
-  private notImplemented(method: string): never {
-    throw new NotImplementedError(
-      `Kapso adapter ${method} is not implemented.`,
-      method,
-    );
   }
 
   private async fetchConversationHistoryPage(

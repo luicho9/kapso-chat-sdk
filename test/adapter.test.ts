@@ -1,7 +1,6 @@
 import { ValidationError } from "@chat-adapter/shared";
 import {
   getEmoji,
-  NotImplementedError,
   type CardElement,
   type ChatInstance,
 } from "chat";
@@ -939,16 +938,34 @@ describe("KapsoAdapter", () => {
         adapter.deleteMessage("kapso:123456789:15551234567", "wamid.123"),
       ).rejects.toThrow("Kapso/WhatsApp does not support deleting messages.");
     });
+  });
 
-    it("throws for startTyping", async () => {
+  describe("read receipts and typing", () => {
+    it("marks inbound messages as read via the Kapso SDK", async () => {
       const adapter = createTestAdapter();
+      const markRead = vi
+        .spyOn(getClient(adapter).messages, "markRead")
+        .mockResolvedValue({ success: true });
+
+      await adapter.markAsRead("wamid.123");
+
+      expect(markRead).toHaveBeenCalledOnce();
+      expect(markRead).toHaveBeenCalledWith({
+        phoneNumberId: "123456789",
+        messageId: "wamid.123",
+      });
+    });
+
+    it("treats startTyping as a no-op instead of guessing", async () => {
+      const adapter = createTestAdapter();
+      const markRead = vi
+        .spyOn(getClient(adapter).messages, "markRead")
+        .mockResolvedValue({ success: true });
 
       await expect(
-        adapter.startTyping("kapso:123456789:15551234567"),
-      ).rejects.toThrow(NotImplementedError);
-      await expect(
-        adapter.startTyping("kapso:123456789:15551234567"),
-      ).rejects.toThrow("startTyping");
+        adapter.startTyping("kapso:123456789:15551234567", "drafting"),
+      ).resolves.toBeUndefined();
+      expect(markRead).not.toHaveBeenCalled();
     });
   });
 });

@@ -141,10 +141,11 @@ Relevant Kapso docs:
 | Outbound text messages | Yes | `postMessage()` sends plain text through Kapso and automatically splits messages over 4096 characters at paragraph or line boundaries when possible. |
 | Outbound cards | Limited | Cards with up to 3 action buttons are sent as WhatsApp interactive reply buttons. Button titles are truncated to 20 characters, and unsupported cards fall back to text. |
 | Reactions | Yes | `addReaction()` and `removeReaction()` send WhatsApp reactions through Kapso. Removing a reaction sends an empty emoji string. |
+| Mark messages as read | Yes | `markAsRead()` delegates to the Kapso SDK `messages.markRead()` helper. |
 | Message edit | No | Platform limitation. `editMessage()` throws because this integration does not support editing previously sent messages. |
 | Message delete | No | Platform limitation. `deleteMessage()` throws because this integration does not support deleting previously sent messages. |
 | Attachments, files, and other richer outbound message types | No | Adapter limitation. Attachments, files, media sends, templates, and other richer outbound message types are not implemented in this adapter yet. |
-| Typing indicator | No | Adapter limitation. `startTyping()` is not implemented in this adapter yet. |
+| Typing indicator | No | No standalone adapter-level typing API is exposed here. `startTyping()` is an intentional parity no-op instead of guessing. |
 
 ### Inbound webhooks
 
