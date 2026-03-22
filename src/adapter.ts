@@ -23,6 +23,7 @@ import {
   type FetchOptions,
   type FetchResult,
   type FormattedContent,
+  getEmoji,
   type Logger,
   Message,
   NotImplementedError,
@@ -32,6 +33,7 @@ import {
 } from "chat";
 import {
   buildAttachments,
+  extractReactionEvent,
   extractMessageText,
   parseUnixTimestamp,
   resolveSenderId,
@@ -374,6 +376,32 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
         userWaId: raw.userWaId,
       });
 
+      const reaction = extractReactionEvent(raw.message);
+      if (reaction) {
+        this.chat.processReaction(
+          {
+            adapter: this,
+            emoji: getEmoji(reaction.rawEmoji),
+            rawEmoji: reaction.rawEmoji,
+            added: reaction.added,
+            user: this.buildAuthor(raw),
+            messageId: reaction.messageId,
+            threadId,
+            raw,
+          },
+          options,
+        );
+        continue;
+      }
+
+      if (raw.message.type === "reaction") {
+        this.logger.warn("Skipping Kapso reaction webhook missing target message", {
+          inboundMessageId: raw.message.id,
+          threadId,
+        });
+        continue;
+      }
+
       this.chat.processMessage(
         this,
         threadId,
@@ -397,9 +425,6 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
       phoneNumberId: raw.phoneNumberId,
       userWaId: raw.userWaId,
     });
-    const senderId = resolveSenderId(raw);
-    const isMe = senderId === this._botUserId;
-    const displayName = raw.contactName ?? (isMe ? this.userName : raw.userWaId);
     const text = extractMessageText(raw.message);
 
     return new Message<KapsoRawMessage>({
@@ -408,13 +433,7 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
       text,
       formatted: this.formatConverter.toAst(text),
       raw,
-      author: {
-        userId: senderId,
-        userName: displayName,
-        fullName: displayName,
-        isBot: false,
-        isMe,
-      },
+      author: this.buildAuthor(raw),
       metadata: {
         dateSent: parseUnixTimestamp(raw.message.timestamp),
         edited: false,
@@ -665,6 +684,20 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
           },
         },
       },
+    };
+  }
+
+  private buildAuthor(raw: KapsoRawMessage) {
+    const senderId = resolveSenderId(raw);
+    const isMe = senderId === this._botUserId;
+    const displayName = raw.contactName ?? (isMe ? this.userName : raw.userWaId);
+
+    return {
+      userId: senderId,
+      userName: displayName,
+      fullName: displayName,
+      isBot: false,
+      isMe,
     };
   }
 

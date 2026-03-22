@@ -63,6 +63,12 @@ export type KapsoMediaData = BaseMediaData & {
   byte_size?: number;
 };
 
+/** Kapso reaction payload supporting both SDK and webhook casing. */
+export type KapsoReaction = NonNullable<UnifiedMessage["reaction"]> & {
+  /** Snake-case reacted-to message ID as delivered by webhooks. */
+  message_id?: string;
+};
+
 /**
  * Kapso webhook extensions for a WhatsApp message.
  *
@@ -156,7 +162,6 @@ export type KapsoMessage = Pick<
   | "interactive"
   | "location"
   | "order"
-  | "reaction"
   | "sticker"
   | "template"
   | "text"
@@ -165,6 +170,7 @@ export type KapsoMessage = Pick<
   | "type"
   | "video"
 > & {
+  reaction?: KapsoReaction;
   kapso?: KapsoMessageExtensions;
   [key: string]: unknown;
 };

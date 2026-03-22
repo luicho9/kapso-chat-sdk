@@ -2,6 +2,12 @@ import type { Attachment } from "chat";
 import type { KapsoMessage, KapsoRawMessage } from "./types.js";
 import { isRecord, readNumber, readString, readValue } from "./value-readers.js";
 
+export interface KapsoReactionEventData {
+  added: boolean;
+  messageId: string;
+  rawEmoji: string;
+}
+
 export function parseUnixTimestamp(value: unknown): Date {
   const seconds = readNumber(value);
   return seconds === undefined ? new Date(0) : new Date(seconds * 1000);
@@ -19,6 +25,32 @@ export function resolveSenderId(raw: KapsoRawMessage): string {
   }
 
   return raw.userWaId;
+}
+
+export function extractReactionEvent(
+  message: KapsoMessage,
+): KapsoReactionEventData | null {
+  if (message.type !== "reaction") {
+    return null;
+  }
+
+  const reaction = message.reaction;
+  if (!reaction) {
+    return null;
+  }
+
+  const messageId = reaction.messageId ?? reaction.message_id;
+  if (typeof messageId !== "string" || messageId.length === 0) {
+    return null;
+  }
+
+  const rawEmoji = typeof reaction.emoji === "string" ? reaction.emoji : "";
+
+  return {
+    added: rawEmoji !== "",
+    messageId,
+    rawEmoji,
+  };
 }
 
 export function extractMessageText(message: KapsoMessage): string {

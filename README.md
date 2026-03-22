@@ -153,7 +153,7 @@ Relevant Kapso docs:
 | Buffered Kapso deliveries            | Yes       | Batched deliveries with `batch: true` and `X-Webhook-Batch: true` are expanded and processed one message at a time.                        |
 | Inbound text messages                | Yes       | Text bodies are surfaced as Chat SDK message text.                                                                                         |
 | Inbound media messages               | Yes       | Supported Kapso media payloads are converted into Chat SDK attachments plus readable fallback text.                                        |
-| Inbound reaction messages            | Yes       | Reaction payloads are parsed and surfaced as Chat SDK messages with fallback text like `[Reaction: 👍]`.                                   |
+| Inbound reaction messages            | Yes       | Live webhook reactions call `chat.processReaction(...)`, so `bot.onReaction(...)` fires. Empty `reaction.emoji` values are treated as reaction removal. |
 | Other Kapso webhook events           | Ignored   | The adapter acknowledges unsupported event types with `200 OK`, but only `whatsapp.message.received` is processed.                         |
 
 ### History and thread info
@@ -161,6 +161,7 @@ Relevant Kapso docs:
 | Feature                  | Supported | Notes                                                                                                                |
 | ------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------- |
 | Message history fetching | Yes       | `fetchMessages()` reads stored conversation history from Kapso and returns Chat SDK messages in chronological order. |
+| Historical reaction events | Limited | Reactions returned by `fetchMessages()` are still surfaced as fallback messages like `[Reaction: 👍]`; only live webhooks emit Chat SDK reaction events. |
 | Thread enrichment        | Yes       | `fetchThread()` enriches metadata with Kapso conversation and contact records when available.                        |
 | DMs                      | Yes       | All conversations are 1:1 DMs. `isDM()` always returns `true`.                                                       |
 

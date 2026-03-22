@@ -1,9 +1,12 @@
 import type { ChatInstance } from "chat";
+import { getEmoji } from "chat";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { KapsoAdapter } from "../src/adapter.js";
 import {
   createImageRawMessage,
   createKapsoWebhookRequest,
   createLogger,
+  createReceivedReactionWebhookEvent,
   createReceivedTextWebhookEvent,
   createTestAdapter,
   createTextRawMessage,
@@ -18,14 +21,16 @@ async function initializeAdapterForWebhooks(adapter = createTestAdapter()) {
     warn: vi.fn(),
   };
   const processMessage = vi.fn();
+  const processReaction = vi.fn();
   const chat = {
     getLogger: () => logger,
     processMessage,
+    processReaction,
   } as unknown as ChatInstance;
 
   await adapter.initialize(chat);
 
-  return { adapter, logger, processMessage };
+  return { adapter, logger, processMessage, processReaction };
 }
 
 describe("KapsoAdapter webhook integration", () => {
@@ -115,6 +120,109 @@ describe("KapsoAdapter webhook integration", () => {
       expect(message?.author.userName).toBe("John Doe");
       expect(message?.threadId).toBe("kapso:123456789:15551234567");
       expect(message?.raw.userWaId).toBe("15551234567");
+    });
+
+    it("emits reaction-added webhook payloads via processReaction", async () => {
+      const { adapter, processMessage, processReaction } =
+        await initializeAdapterForWebhooks();
+      const options = { waitUntil: vi.fn() };
+
+      const response = await adapter.handleWebhook(
+        createKapsoWebhookRequest(createReceivedReactionWebhookEvent(), {
+          headers: {
+            "x-webhook-event": "whatsapp.message.received",
+          },
+        }),
+        options,
+      );
+
+      expect(response.status).toBe(200);
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(processReaction).toHaveBeenCalledOnce();
+      expect(processReaction).toHaveBeenCalledWith(
+        {
+          adapter,
+          emoji: getEmoji("👍"),
+          rawEmoji: "👍",
+          added: true,
+          user: {
+            userId: "15551234567",
+            userName: "John Doe",
+            fullName: "John Doe",
+            isBot: false,
+            isMe: false,
+          },
+          messageId: "wamid.original",
+          threadId: "kapso:123456789:15551234567",
+          raw: {
+            phoneNumberId: "123456789",
+            userWaId: "15551234567",
+            contactName: "John Doe",
+            message: createReceivedReactionWebhookEvent().message,
+          },
+        },
+        options,
+      );
+    });
+
+    it("emits reaction-removed webhook payloads via processReaction", async () => {
+      const { adapter, processMessage, processReaction } =
+        await initializeAdapterForWebhooks();
+      const options = { waitUntil: vi.fn() };
+
+      const response = await adapter.handleWebhook(
+        createKapsoWebhookRequest(
+          createReceivedReactionWebhookEvent({
+            message: {
+              ...createReceivedReactionWebhookEvent().message,
+              reaction: {
+                message_id: "wamid.original",
+                emoji: "",
+              },
+            },
+          }),
+          {
+            headers: {
+              "x-webhook-event": "whatsapp.message.received",
+            },
+          },
+        ),
+        options,
+      );
+
+      expect(response.status).toBe(200);
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(processReaction).toHaveBeenCalledOnce();
+      expect(processReaction).toHaveBeenCalledWith(
+        {
+          adapter,
+          emoji: getEmoji(""),
+          rawEmoji: "",
+          added: false,
+          user: {
+            userId: "15551234567",
+            userName: "John Doe",
+            fullName: "John Doe",
+            isBot: false,
+            isMe: false,
+          },
+          messageId: "wamid.original",
+          threadId: "kapso:123456789:15551234567",
+          raw: {
+            phoneNumberId: "123456789",
+            userWaId: "15551234567",
+            contactName: "John Doe",
+            message: {
+              ...createReceivedReactionWebhookEvent().message,
+              reaction: {
+                message_id: "wamid.original",
+                emoji: "",
+              },
+            },
+          },
+        },
+        options,
+      );
     });
 
     it("processes buffered whatsapp.message.received webhook payloads", async () => {

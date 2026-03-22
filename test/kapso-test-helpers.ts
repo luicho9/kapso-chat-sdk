@@ -279,6 +279,43 @@ export function createReceivedTextWebhookEvent(
   };
 }
 
+export function createReceivedReactionWebhookEvent(
+  overrides?: Partial<KapsoWebhookMessageReceivedEvent>,
+): KapsoWebhookMessageReceivedEvent {
+  return {
+    message: {
+      id: "wamid.reaction",
+      from: "15551234567",
+      timestamp: "1730092802",
+      type: "reaction",
+      reaction: {
+        message_id: "wamid.original",
+        emoji: "👍",
+      },
+      kapso: {
+        direction: "inbound",
+        status: "received",
+        processing_status: "pending",
+        origin: "cloud_api",
+        has_media: false,
+      },
+    },
+    conversation: {
+      id: "conv_123",
+      phone_number: "+1 (555) 123-4567",
+      status: "active",
+      metadata: {},
+      phone_number_id: "123456789",
+      kapso: {
+        contact_name: "John Doe",
+      },
+    },
+    is_new_conversation: false,
+    phone_number_id: "123456789",
+    ...overrides,
+  };
+}
+
 export function createTextRawMessage(): KapsoRawMessage {
   return {
     phoneNumberId: "123456789",

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAttachments,
+  extractReactionEvent,
   extractMessageText,
   parseUnixTimestamp,
   resolveSenderId,
@@ -134,6 +135,26 @@ describe("message-parser", () => {
       };
 
       expect(extractMessageText(message)).toBe("From content object");
+    });
+  });
+
+  describe("extractReactionEvent", () => {
+    it("normalizes webhook reaction payloads with snake_case message_id", () => {
+      const message: KapsoMessage = {
+        id: "wamid.reaction",
+        timestamp: "1730092800",
+        type: "reaction",
+        reaction: {
+          message_id: "wamid.original",
+          emoji: "",
+        },
+      };
+
+      expect(extractReactionEvent(message)).toEqual({
+        added: false,
+        messageId: "wamid.original",
+        rawEmoji: "",
+      });
     });
   });
 
