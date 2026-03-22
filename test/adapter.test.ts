@@ -940,6 +940,84 @@ describe("KapsoAdapter", () => {
     });
   });
 
+  describe("stream", () => {
+    it("buffers streamed text chunks and sends one final message", async () => {
+      const adapter = createTestAdapter();
+      const sendText = vi
+        .spyOn(getClient(adapter).messages, "sendText")
+        .mockResolvedValue(createSendResponse("wamid.streamed"));
+
+      async function* chunks() {
+        yield "Hello";
+        yield " ";
+        yield "world";
+      }
+
+      const result = await adapter.stream(
+        "kapso:123456789:15551234567",
+        chunks(),
+      );
+
+      expect(sendText).toHaveBeenCalledOnce();
+      expect(sendText).toHaveBeenCalledWith({
+        phoneNumberId: "123456789",
+        to: "15551234567",
+        body: "Hello world",
+      });
+      expect(result).toEqual({
+        id: "wamid.streamed",
+        threadId: "kapso:123456789:15551234567",
+        raw: {
+          phoneNumberId: "123456789",
+          userWaId: "15551234567",
+          message: {
+            id: "wamid.streamed",
+            type: "text",
+            timestamp: expect.any(String),
+            from: "123456789",
+            to: "15551234567",
+            text: {
+              body: "Hello world",
+            },
+          },
+        },
+      });
+    });
+
+    it("buffers markdown_text chunks and ignores non-text stream chunks", async () => {
+      const adapter = createTestAdapter();
+      const sendText = vi
+        .spyOn(getClient(adapter).messages, "sendText")
+        .mockResolvedValue(createSendResponse("wamid.streamed.markdown"));
+
+      async function* chunks() {
+        yield { type: "markdown_text" as const, text: "**Hello**" };
+        yield {
+          type: "task_update" as const,
+          id: "step-1",
+          title: "Drafting response",
+          status: "in_progress" as const,
+        };
+        yield { type: "markdown_text" as const, text: " world" };
+        yield { type: "plan_update" as const, title: "Wrap up" };
+      }
+
+      const result = await adapter.stream(
+        "kapso:123456789:15551234567",
+        chunks(),
+      );
+
+      expect(sendText).toHaveBeenCalledOnce();
+      expect(sendText).toHaveBeenCalledWith({
+        phoneNumberId: "123456789",
+        to: "15551234567",
+        body: "*Hello* world",
+      });
+      expect(result.id).toBe("wamid.streamed.markdown");
+      expect(result.raw.message.text?.body).toBe("*Hello* world");
+    });
+  });
+
   describe("read receipts and typing", () => {
     it("marks inbound messages as read via the Kapso SDK", async () => {
       const adapter = createTestAdapter();

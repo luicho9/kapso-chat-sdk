@@ -27,6 +27,8 @@ import {
   type Logger,
   Message,
   type RawMessage,
+  type StreamChunk,
+  type StreamOptions,
   type ThreadInfo,
   type WebhookOptions,
 } from "chat";
@@ -524,6 +526,29 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
     throw new Error(
       "Kapso/WhatsApp does not support editing messages. Use postMessage() instead.",
     );
+  }
+
+  /**
+   * Stream a message by buffering all chunks and sending as a single message.
+   * WhatsApp does not support message editing, so incremental updates are not
+   * attempted.
+   */
+  async stream(
+    threadId: string,
+    textStream: AsyncIterable<string | StreamChunk>,
+    _options?: StreamOptions,
+  ): Promise<RawMessage<KapsoRawMessage>> {
+    let accumulated = "";
+
+    for await (const chunk of textStream) {
+      if (typeof chunk === "string") {
+        accumulated += chunk;
+      } else if (chunk.type === "markdown_text") {
+        accumulated += chunk.text;
+      }
+    }
+
+    return this.postMessage(threadId, { markdown: accumulated });
   }
 
   /** Not supported. Always throws — WhatsApp does not support deleting sent messages. */

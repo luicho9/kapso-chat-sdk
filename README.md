@@ -139,6 +139,7 @@ Relevant Kapso docs:
 | Feature | Supported | Notes |
 | ------- | --------- | ----- |
 | Outbound text messages | Yes | `postMessage()` sends plain text through Kapso and automatically splits messages over 4096 characters at paragraph or line boundaries when possible. |
+| Buffered streaming | Yes | `stream()` buffers `string` and `markdown_text` chunks, ignores non-text stream chunks, and sends one final message through `postMessage()`. It does not attempt incremental edits because WhatsApp does not support them. |
 | Outbound cards | Limited | Cards with up to 3 action buttons are sent as WhatsApp interactive reply buttons. Button titles are truncated to 20 characters, and unsupported cards fall back to text. |
 | Reactions | Yes | `addReaction()` and `removeReaction()` send WhatsApp reactions through Kapso. Removing a reaction sends an empty emoji string. |
 | Mark messages as read | Yes | `markAsRead()` delegates to the Kapso SDK `messages.markRead()` helper. |
