@@ -10,13 +10,14 @@ WhatsApp adapter for [Chat SDK](https://chat-sdk.dev/docs) via Kapso, using Kaps
 ## Installation
 
 ```bash
-pnpm add @luicho/kapso-chat-sdk chat
+pnpm add @luicho/kapso-chat-sdk chat @chat-adapter/state-memory
 ```
 
 ## Usage
 
 ```typescript
 import { Chat } from "chat";
+import { MemoryStateAdapter } from "@chat-adapter/state-memory";
 import { createKapsoAdapter } from "@luicho/kapso-chat-sdk";
 
 export const bot = new Chat({
@@ -24,6 +25,7 @@ export const bot = new Chat({
   adapters: {
     kapso: createKapsoAdapter(),
   },
+  state: new MemoryStateAdapter(),
 });
 
 bot.onDirectMessage(async (thread, message) => {
@@ -32,9 +34,21 @@ bot.onDirectMessage(async (thread, message) => {
 });
 ```
 
-When using `createKapsoAdapter()` without arguments, credentials are auto-detected from environment variables.
+When using `createKapsoAdapter()` without arguments, credentials are auto-detected from environment variables. The example above uses in-memory state for local development; for deployed workloads, use a durable Chat SDK state adapter.
 
 WhatsApp conversations via Kapso are always 1:1 DMs. `onDirectMessage` is usually the clearest entry point. If you do not register any `onDirectMessage` handlers, DM messages fall through to [`onNewMention`](https://chat-sdk.dev/docs/handling-events) for backward compatibility. See the [Chat SDK adapters docs](https://chat-sdk.dev/docs/adapters) and [direct messages guide](https://chat-sdk.dev/docs/direct-messages) for broader integration patterns.
+
+## Examples
+
+The repo includes standalone examples under [`examples/`](./examples). Each example has its own `package.json`, `server.ts`, and `.env.example`.
+
+- [`examples/basic`](./examples/basic) shows the smallest echo-bot setup.
+- [`examples/support-bot`](./examples/support-bot) shows a simple ticket-style flow with thread state.
+- [`examples/interactive-menu`](./examples/interactive-menu) shows WhatsApp interactive reply buttons via Chat SDK cards.
+- [`examples/media`](./examples/media) shows how inbound media attachments are exposed and downloaded.
+- [`examples/ai-reply`](./examples/ai-reply) shows a streamed OpenAI-powered reply bot using AI SDK 6.
+
+To run an example, open the example directory, install its dependencies with your preferred package manager, copy `.env.example` to `.env`, fill in the required credentials, and run its `dev` script.
 
 ## Environment variables
 
