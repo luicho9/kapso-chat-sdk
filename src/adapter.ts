@@ -429,7 +429,7 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
         continue;
       }
 
-      if (raw.message.type === "interactive" || raw.message.type === "button") {
+      if (this.expectsInboundActionCallback(raw.message)) {
         this.logger.warn(
           "Skipping Kapso action webhook missing callback data",
           {
@@ -771,6 +771,24 @@ export class KapsoAdapter implements Adapter<KapsoThreadId, KapsoRawMessage> {
     }
 
     return null;
+  }
+
+  private expectsInboundActionCallback(message: KapsoMessage): boolean {
+    if (message.type === "button") {
+      return true;
+    }
+
+    if (message.type !== "interactive") {
+      return false;
+    }
+
+    const interactive = message.interactive;
+    if (!interactive || typeof interactive !== "object") {
+      return false;
+    }
+
+    const type = "type" in interactive ? interactive.type : undefined;
+    return type === "button_reply" || type === "list_reply";
   }
 
   private async sendTextMessage(

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { KapsoAdapter } from "../src/adapter.js";
 import {
   createReceivedButtonWebhookEvent,
+  createReceivedInteractiveFlowReplyWebhookEvent,
   createImageRawMessage,
   createKapsoWebhookRequest,
   createLogger,
@@ -297,6 +298,80 @@ describe("KapsoAdapter webhook integration", () => {
         messageId: "wamid.list",
         threadId: "kapso:123456789:15551234567",
       });
+    });
+
+    it("processes WhatsApp Flow replies as regular messages", async () => {
+      const { adapter, processAction, processMessage } =
+        await initializeAdapterForWebhooks();
+      const options = { waitUntil: vi.fn() };
+
+      const response = await adapter.handleWebhook(
+        createKapsoWebhookRequest(createReceivedInteractiveFlowReplyWebhookEvent(), {
+          headers: {
+            "x-webhook-event": "whatsapp.message.received",
+          },
+        }),
+        options,
+      );
+
+      expect(response.status).toBe(200);
+      expect(processAction).not.toHaveBeenCalled();
+      expect(processMessage).toHaveBeenCalledOnce();
+      expect(processMessage).toHaveBeenCalledWith(
+        adapter,
+        "kapso:123456789:15551234567",
+        expect.any(Function),
+        options,
+      );
+
+      const factory = processMessage.mock.calls[0]?.[2] as
+        | (() => Promise<ReturnType<KapsoAdapter["parseMessage"]>>)
+        | undefined;
+      const message = await factory?.();
+
+      expect(message?.raw.message.kapso?.flow_response).toEqual({
+        flow_token: "1197715005513101",
+        appointment_date: "2024-01-15",
+        appointment_time: "10:00",
+      });
+      expect(message?.raw.message.kapso?.flow_token).toBe("1197715005513101");
+      expect(message?.raw.message.kapso?.flow_name).toBe("flow");
+    });
+
+    it("warns and skips malformed interactive action payloads", async () => {
+      const { adapter, logger, processAction, processMessage } =
+        await initializeAdapterForWebhooks();
+      const event = createReceivedInteractiveButtonReplyWebhookEvent({
+        message: {
+          ...createReceivedInteractiveButtonReplyWebhookEvent().message,
+          interactive: {
+            type: "button_reply",
+            button_reply: {
+              title: "Report bug",
+            },
+          } as Record<string, unknown>,
+        },
+      });
+
+      const response = await adapter.handleWebhook(
+        createKapsoWebhookRequest(event, {
+          headers: {
+            "x-webhook-event": "whatsapp.message.received",
+          },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(processAction).not.toHaveBeenCalled();
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Skipping Kapso action webhook missing callback data",
+        {
+          inboundMessageId: "wamid.interactive",
+          threadId: "kapso:123456789:15551234567",
+          type: "interactive",
+        },
+      );
     });
 
     it("emits legacy button replies via processAction", async () => {

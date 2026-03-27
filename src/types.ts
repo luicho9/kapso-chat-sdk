@@ -78,14 +78,26 @@ export interface KapsoInteractiveListReply extends KapsoInteractiveButtonReply {
   description?: string;
 }
 
-export interface KapsoInteractiveReply {
+export interface KapsoInteractiveNfmReplyValue {
+  name?: string;
+  body?: string;
+  response_json?: string;
+}
+
+export interface KapsoInteractiveActionReply {
   type: "button_reply" | "list_reply";
   button_reply?: KapsoInteractiveButtonReply;
   list_reply?: KapsoInteractiveListReply;
 }
 
+export interface KapsoInteractiveNfmReply {
+  type: "nfm_reply";
+  nfm_reply?: KapsoInteractiveNfmReplyValue;
+}
+
 export type KapsoInteractivePayload =
-  | KapsoInteractiveReply
+  | KapsoInteractiveActionReply
+  | KapsoInteractiveNfmReply
   | Record<string, unknown>;
 
 export interface KapsoLegacyButtonReply {

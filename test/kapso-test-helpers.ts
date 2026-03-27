@@ -398,6 +398,55 @@ export function createReceivedInteractiveListReplyWebhookEvent(
   };
 }
 
+export function createReceivedInteractiveFlowReplyWebhookEvent(
+  overrides?: Partial<KapsoWebhookMessageReceivedEvent>,
+): KapsoWebhookMessageReceivedEvent {
+  return {
+    message: {
+      id: "wamid.flow",
+      from: "15551234567",
+      timestamp: "1730092806",
+      type: "interactive",
+      interactive: {
+        type: "nfm_reply",
+        nfm_reply: {
+          name: "flow",
+          body: "Sent",
+          response_json:
+            '{"flow_token":"1197715005513101","appointment_date":"2024-01-15","appointment_time":"10:00"}',
+        },
+      },
+      kapso: {
+        direction: "inbound",
+        status: "received",
+        processing_status: "pending",
+        origin: "cloud_api",
+        has_media: false,
+        flow_response: {
+          flow_token: "1197715005513101",
+          appointment_date: "2024-01-15",
+          appointment_time: "10:00",
+        },
+        flow_token: "1197715005513101",
+        flow_name: "flow",
+      },
+    },
+    conversation: {
+      id: "conv_123",
+      phone_number: "+1 (555) 123-4567",
+      status: "active",
+      metadata: {},
+      phone_number_id: "123456789",
+      kapso: {
+        contact_name: "John Doe",
+      },
+    },
+    is_new_conversation: false,
+    phone_number_id: "123456789",
+    ...overrides,
+  };
+}
+
 export function createReceivedButtonWebhookEvent(
   overrides?: Partial<KapsoWebhookMessageReceivedEvent>,
 ): KapsoWebhookMessageReceivedEvent {
